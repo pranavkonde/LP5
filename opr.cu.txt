@@ -1,0 +1,175 @@
+#include <stdio.h>
+
+#define BLOCK_SIZE 256
+
+// Parallel reduction kernel for computing the minimum value
+__global__ void min_reduction(int* input, int* output, int size)
+{
+    __shared__ int shared_min[BLOCK_SIZE];
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Each thread loads an element from global memory to shared memory
+    if (i < size)
+        shared_min[tid] = input[i];
+    else
+        shared_min[tid] = INT_MAX;
+
+    __syncthreads();
+
+    // Perform parallel reduction
+    for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (tid < stride && i + stride < size)
+            shared_min[tid] = min(shared_min[tid], shared_min[tid + stride]);
+
+        __syncthreads();
+    }
+
+    // Store the final result in global memory
+    if (tid == 0)
+        output[blockIdx.x] = shared_min[0];
+}
+
+// Parallel reduction kernel for computing the maximum value
+__global__ void max_reduction(int* input, int* output, int size)
+{
+    __shared__ int shared_max[BLOCK_SIZE];
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Each thread loads an element from global memory to shared memory
+    if (i < size)
+        shared_max[tid] = input[i];
+    else
+        shared_max[tid] = INT_MIN;
+
+    __syncthreads();
+
+    // Perform parallel reduction
+    for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (tid < stride && i + stride < size)
+            shared_max[tid] = max(shared_max[tid], shared_max[tid + stride]);
+
+        __syncthreads();
+    }
+
+    // Store the final result in global memory
+    if (tid == 0)
+        output[blockIdx.x] = shared_max[0];
+}
+
+// Parallel reduction kernel for computing the sum and average
+__global__ void sum_avg_reduction(int* input, int* output_sum, int* output_avg, int size)
+{
+    __shared__ int shared_sum[BLOCK_SIZE];
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Each thread loads an element from global memory to shared memory
+    if (i < size)
+        shared_sum[tid] = input[i];
+    else
+        shared_sum[tid] = 0;
+
+    __syncthreads();
+
+    // Perform parallel reduction to compute the sum
+    for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (tid < stride && i + stride < size)
+            shared_sum[tid] += shared_sum[tid + stride];
+
+        __syncthreads();
+    }
+
+    // Store the final sum in global memory
+    if (tid == 0)
+        output_sum[blockIdx.x] = shared_sum[0];
+
+    __syncthreads();
+
+    // Compute the average
+    if (tid == 0)
+        *output_avg = *output_sum / size;
+}
+
+int main()
+{
+    int size = 1024;  // Size of the input array
+    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;  // Number of blocks needed
+
+    // Allocate memory on the host
+    int* host_input = new int[size];
+    int* host_output_min = new int[num_blocks];
+    int* host_output_max = new int[num_blocks];
+    int* host_output_sum = new int[num_blocks];
+    int* host_output_avg = new int[1];
+
+    // Initialize the input array
+    for (int i = 0; i < size; i++)
+        host_input[i] = i + 1;
+
+    // Allocate memory on the device
+    int* device_input;
+    int* device_output_min;
+    int* device_output_max;
+    int* device_output_sum;
+    int* device_output_avg;
+    cudaMalloc((void**)&device_input, size * sizeof(int));
+    cudaMalloc((void**)&device_output_min, num_blocks * sizeof(int));
+    cudaMalloc((void**)&device_output_max, num_blocks * sizeof(int));
+    cudaMalloc((void**)&device_output_sum, num_blocks * sizeof(int));
+    cudaMalloc((void**)&device_output_avg, sizeof(int));
+
+    // Copy the input array from the host to the device
+    cudaMemcpy(device_input, host_input, size * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Compute the minimum value using parallel reduction
+    min_reduction<<<num_blocks, BLOCK_SIZE>>>(device_input, device_output_min, size);
+
+    // Compute the maximum value using parallel reduction
+    max_reduction<<<num_blocks, BLOCK_SIZE>>>(device_input, device_output_max, size);
+
+    // Compute the sum and average using parallel reduction
+    sum_avg_reduction<<<num_blocks, BLOCK_SIZE>>>(device_input, device_output_sum, device_output_avg, size);
+
+    // Copy the results from the device to the host
+    cudaMemcpy(host_output_min, device_output_min, num_blocks * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host_output_max, device_output_max, num_blocks * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host_output_sum, device_output_sum, num_blocks * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host_output_avg, device_output_avg, sizeof(int), cudaMemcpyDeviceToHost);
+
+    // Compute the final result on the host by reducing the per-block results
+    int min_value = host_output_min[0];
+    int max_value = host_output_max[0];
+    int sum = 0;
+    for (int i = 0; i < num_blocks; i++)
+    {
+        min_value = min(min_value, host_output_min[i]);
+        max_value = max(max_value, host_output_max[i]);
+        sum += host_output_sum[i];
+    }
+    float avg = static_cast<float>(sum) / size;
+
+    // Print the results
+    printf("Minimum value: %d\n", min_value);
+    printf("Maximum value: %d\n", max_value);
+    printf("Sum: %d\n", sum);
+    printf("Average: %.2f\n", avg);
+
+    // Free memory
+    delete[] host_input;
+    delete[] host_output_min;
+    delete[] host_output_max;
+    delete[] host_output_sum;
+    delete[] host_output_avg;
+    cudaFree(device_input);
+    cudaFree(device_output_min);
+    cudaFree(device_output_max);
+    cudaFree(device_output_sum);
+    cudaFree(device_output_avg);
+
+    return 0;
+}
